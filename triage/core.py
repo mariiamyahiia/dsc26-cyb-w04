@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+import hashlib
+import json
+import re
 
 SEVERITIES = ["info", "low", "medium", "high", "critical"]   # lowest to highest
-
+_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 
 @dataclass(frozen=True)
 class Finding:
@@ -34,12 +37,12 @@ class Group:
     @property
     def tools(self) -> list[str]:
         """Sorted list of the tool names of the members."""
-        raise NotImplementedError
+        return sorted({f.tool for f in self.findings})
 
     @property
     def fingerprints(self) -> list[str]:
         """Sorted list of the members' fingerprints."""
-        raise NotImplementedError
+        return sorted(fingerprint(f) for f in self.findings)
 
 
 @dataclass(frozen=True)
@@ -51,11 +54,21 @@ class Suppression:
 
 
 def normalize_path(raw: str, project: str) -> str:
-    raise NotImplementedError
+    path = raw.replace("\\", "/")
+    if path.startswith("file://"):
+        path = path[len("file://"):]
+    parts = [p for p in path.split("/") if p not in ("", ".")]
+    if project in parts:
+        # keep only what comes after the LAST occurrence of the project name
+        last = len(parts) - 1 - parts[::-1].index(project)
+        parts = parts[last + 1:]
+    return "/".join(parts)
 
 
 def fingerprint(f: Finding) -> str:
-    raise NotImplementedError
+    code = " ".join(f.code.split())     # indentation and spacing do not change identity
+    key = f"{f.tool}|{f.rule_id}|{f.path}|{code}"
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 def load_semgrep_sarif(path, project: str) -> list[Finding]:
