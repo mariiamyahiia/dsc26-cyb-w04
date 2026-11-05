@@ -29,7 +29,6 @@ class Finding:
     message: str
     code: str            # the source text of the finding's line, as reported by the tool
 
-
 @dataclass
 class Group:
     key: str             # the issue key shared by its findings
@@ -48,14 +47,12 @@ class Group:
         """Sorted list of the members' fingerprints."""
         return sorted(fingerprint(f) for f in self.findings)
 
-
 @dataclass(frozen=True)
 class Suppression:
     fingerprint: str
     reason: str
     expires: date
     by: str
-
 
 def normalize_path(raw: str, project: str) -> str:
     path = raw.replace("\\", "/")
@@ -68,25 +65,20 @@ def normalize_path(raw: str, project: str) -> str:
         parts = parts[last + 1:]
     return "/".join(parts)
 
-
 def fingerprint(f: Finding) -> str:
     code = " ".join(f.code.split())     # indentation and spacing do not change identity
     key = f"{f.tool}|{f.rule_id}|{f.path}|{code}"
     return hashlib.sha256(key.encode()).hexdigest()
 
-
 def _as_dict(value) -> dict:
     return value if isinstance(value, dict) else {}
-
 
 def _as_list(value) -> list:
     return value if isinstance(value, list) else []
 
-
 def _read_json(path):
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
-
 
 def _to_int(value) -> int | None:
     if isinstance(value, bool):
@@ -95,7 +87,6 @@ def _to_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
 
 def _score_to_severity(value) -> str | None:
     """Map a security-severity score to a severity, or None if it is not a usable number."""
@@ -115,7 +106,6 @@ def _score_to_severity(value) -> str | None:
         return "medium"
     return "low"
 
-
 def _sarif_severity(result: dict, rule: dict) -> str:
     mapped = _score_to_severity(_as_dict(rule.get("properties")).get("security-severity"))
     if mapped is not None:
@@ -127,7 +117,6 @@ def _sarif_severity(result: dict, rule: dict) -> str:
         level = "warning"
     return _SARIF_LEVELS.get(str(level).lower(), "medium")
 
-
 def _cwe_from_tags(rule: dict) -> int | None:
     for tag in _as_list(_as_dict(rule.get("properties")).get("tags")):
         if isinstance(tag, str):
@@ -135,7 +124,6 @@ def _cwe_from_tags(rule: dict) -> int | None:
             if match:
                 return int(match.group(1))
     return None
-
 
 def load_semgrep_sarif(path, project: str) -> list[Finding]:
     data = _read_json(path)
@@ -173,13 +161,11 @@ def load_semgrep_sarif(path, project: str) -> list[Finding]:
             ))
     return findings
 
-
 def _bandit_severity(severity, confidence) -> str:
     base = _BANDIT_SEVERITIES.get(str(severity).upper(), "info")
     if str(confidence).upper() == "LOW":
         base = SEVERITIES[max(_RANK[base] - 1, 0)]       # one step lower; info stays info
     return base
-
 
 def _bandit_code_line(block, line_number: int) -> str:
     """Bandit's code block: several lines, each 'NUMBER text'. Take the line whose number EQUALS line_number."""
@@ -190,7 +176,6 @@ def _bandit_code_line(block, line_number: int) -> str:
         if match and int(match.group(1)) == line_number:
             return match.group(2) or ""
     return ""
-
 
 def load_bandit(path, project: str) -> list[Finding]:
     data = _read_json(path)
@@ -215,12 +200,31 @@ def load_bandit(path, project: str) -> list[Finding]:
     return findings
 
 def issue_key(f: Finding, equivalences: dict[str, str]) -> str:
-    raise NotImplementedError
+    named = f"{f.tool}:{f.rule_id}"
+    if named in equivalences:
+        return equivalences[named]
+    if f.cwe is not None:
+        return f"CWE-{f.cwe}"
+    return named
 
+def _member_order(f: Finding):
+    return (f.tool, f.rule_id, _RANK.get(f.severity, -1), -1 if f.cwe is None else f.cwe,
+            f.message, f.code, f.path, f.line)
 
+\
 def dedupe(findings: list[Finding], equivalences: dict[str, str] | None = None) -> list[Group]:
-    raise NotImplementedError
+    equivalences = equivalences or {}
+    buckets: dict[tuple, list[Finding]] = {}
+    for f in findings:
+        buckets.setdefault((f.path, f.line, issue_key(f, equivalences)), []).append(f)
 
+    groups = []
+    for (path, line, key), members in buckets.items():
+        members = sorted(members, key=_member_order)       # same order whatever the input order
+        severity = max((m.severity for m in members), key=lambda s: _RANK.get(s, -1))
+        groups.append(Group(key=key, path=path, line=line, severity=severity, findings=members))
+    groups.sort(key=lambda g: (-_RANK.get(g.severity, -1), g.path, g.line, g.key))
+    return groups
 
 def load_suppressions(entries: list[dict]) -> tuple[list[Suppression], list[dict]]:
     raise NotImplementedError
