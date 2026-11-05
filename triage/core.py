@@ -17,6 +17,7 @@ _RANK = {s: i for i, s in enumerate(SEVERITIES)}
 _SARIF_LEVELS = {"error": "high", "warning": "medium", "note": "low", "none": "info"}
 _BANDIT_SEVERITIES = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}
 _CWE_TAG = re.compile(r"CWE-([0-9]+)")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 @dataclass(frozen=True)
 class Finding:
@@ -226,19 +227,67 @@ def dedupe(findings: list[Finding], equivalences: dict[str, str] | None = None) 
     groups.sort(key=lambda g: (-_RANK.get(g.severity, -1), g.path, g.line, g.key))
     return groups
 
+def _parse_suppression(entry) -> Suppression | None:
+    if not isinstance(entry, dict):
+        return None
+    fp = entry.get("fingerprint")
+    reason = entry.get("reason")
+    by = entry.get("by")
+    expires = entry.get("expires")
+    if not (isinstance(fp, str) and _HEX64.fullmatch(fp)):
+        return None
+    if not (isinstance(reason, str) and len(reason.strip()) >= 10):
+        return None
+    if not (isinstance(by, str) and by.strip()):
+        return None
+    if not isinstance(expires, str):
+        return None
+    try:
+        day = date.fromisoformat(expires)
+    except ValueError:
+        return None
+    return Suppression(fingerprint=fp, reason=reason, expires=day, by=by)
+
+
 def load_suppressions(entries: list[dict]) -> tuple[list[Suppression], list[dict]]:
-    raise NotImplementedError
+    valid, invalid = [], []
+    for entry in entries:
+        parsed = _parse_suppression(entry)
+        if parsed is None:
+            invalid.append(entry)
+        else:
+            valid.append(parsed)
+    return valid, invalid
 
 
 def apply_suppressions(groups: list[Group], suppressions: list[Suppression],
                        today: date) -> tuple[list[Group], list[Group]]:
-    raise NotImplementedError
+    live = {s.fingerprint for s in suppressions if s.expires >= today}   # expiring today still applies
+    active, suppressed = [], []
+    for g in groups:
+        if any(fp in live for fp in g.fingerprints):                      # one suppressed member hides the group
+            suppressed.append(g)
+        else:
+            active.append(g)
+    return active, suppressed
 
 
 def diff_baseline(groups: list[Group], baseline: set[str]) -> tuple[list[Group], list[Group], list[str]]:
-    raise NotImplementedError
+    baseline = set(baseline)
+    new, existing = [], []
+    seen: set[str] = set()
+    for g in groups:
+        fps = g.fingerprints
+        seen.update(fps)
+        if any(fp in baseline for fp in fps):
+            existing.append(g)
+        else:
+            new.append(g)
+    fixed = sorted(fp for fp in baseline if fp not in seen)
+    return new, existing, fixed
 
 
 def gate(new_active: list[Group], fail_on: str) -> bool:
     """True means the build passes."""
-    raise NotImplementedError
+    threshold = _RANK[fail_on]
+    return not any(_RANK.get(g.severity, -1) >= threshold for g in new_active)
