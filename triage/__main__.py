@@ -9,7 +9,22 @@ passes, 1 if it fails, 2 if an input file is missing, unreadable or not valid JS
 before the baseline comparison.
 """
 import argparse
+import json
 import sys
+from datetime import date
+
+from .core import (apply_suppressions, dedupe, diff_baseline, gate, load_bandit,
+                   load_semgrep_sarif, load_suppressions)
+
+
+def _load_json(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _group_json(g) -> dict:
+    return {"key": g.key, "path": g.path, "line": g.line, "severity": g.severity,
+            "tools": g.tools, "fingerprints": g.fingerprints}
 
 
 def main(argv=None) -> int:
@@ -23,7 +38,38 @@ def main(argv=None) -> int:
     ap.add_argument("--today")
     ap.add_argument("--fail-on", default="high", choices=["info", "low", "medium", "high", "critical"])
     args = ap.parse_args(argv)
-    raise NotImplementedError
+
+    try:
+        today = date.fromisoformat(args.today) if args.today else date.today()
+        findings = load_semgrep_sarif(args.sarif, args.project) + load_bandit(args.bandit, args.project)
+        equivalences = _load_json(args.equivalences) if args.equivalences else {}
+        baseline = _load_json(args.baseline) if args.baseline else []
+        entries = _load_json(args.suppressions) if args.suppressions else []
+        if not isinstance(equivalences, dict):
+            raise ValueError("equivalences must be a JSON object")
+        if not isinstance(baseline, list) or not all(isinstance(x, str) for x in baseline):
+            raise ValueError("baseline must be a JSON list of fingerprints")
+        if not isinstance(entries, list):
+            raise ValueError("suppressions must be a JSON list")
+    except (OSError, ValueError) as exc:          # missing, unreadable, not JSON, wrong shape, bad date
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    groups = dedupe(findings, equivalences)
+    suppressions, invalid = load_suppressions(entries)
+    active, suppressed = apply_suppressions(groups, suppressions, today)      # suppressions first
+    new, existing, fixed = diff_baseline(active, set(baseline))               # then the baseline
+    passed = gate(new, args.fail_on)
+
+    print(json.dumps({
+        "passed": passed,
+        "new": [_group_json(g) for g in new],
+        "existing": [_group_json(g) for g in existing],
+        "suppressed": [_group_json(g) for g in suppressed],
+        "fixed": fixed,
+        "invalid_suppressions": len(invalid),
+    }, indent=2))
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
